@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from math import sqrt
 from torch.nn import LayerNorm as FusedLayerNorm
 import math
+from torch.nn.utils.rnn import pack_padded_sequence
 
 NUM_SEQUENCES = 4
 MAX_SEQUENCE_LENGTH = 10
@@ -18,7 +19,7 @@ class KroneckerModel(nn.Module):
         self.num_layers = num_layers
         self.input_linear = nn.Linear(input_embedding_dim, vector_dim)
         self.transformer_layers = nn.ModuleList([EncoderLayer(vector_dim, hidden_multiplier,
-                                                                  num_heads, dropout_prob)])
+                                                                  num_heads, dropout_prob) for _ in range(0, self.num_layers)])
         self.dropout = nn.Dropout(dropout_prob)
         self.out = nn.Linear(vector_dim, 1)
 
@@ -27,10 +28,11 @@ class KroneckerModel(nn.Module):
             attention_mask = torch.abs(attention_mask - 1)  # Invert the mask
             attention_mask[attention_mask == 1] = -math.inf
             attention_mask = torch.unsqueeze(torch.unsqueeze(attention_mask, 1), 1)  # Insert two dummy dimensions
-        tensor = self.input_embedding(raw_input) + self.sequence_embedding(sequence_input) + self.term_embedding(term_input)
+        position_info = self.sequence_embedding(sequence_input) + self.term_embedding(term_input)
+        tensor = self.input_embedding(raw_input) 
         tensor = gelu(self.input_linear(tensor))
-        for _ in range(self.num_layers):
-            tensor = self.transformer_layers[0](tensor, attention_mask)
+        for i in range(self.num_layers):
+            tensor = self.transformer_layers[i](tensor, position_info, attention_mask)
         out = self.out(tensor)
         return out
 
@@ -114,8 +116,8 @@ class EncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout_prob)
         self.layers = nn.ModuleList([self.attention, self.feed_forward, self.dropout])
 
-    def forward(self, tensor_in, attention_mask):
-        attention_out = self.dropout(self.attention(tensor_in, attention_mask))
+    def forward(self, tensor_in, position_info, attention_mask):
+        attention_out = self.dropout(self.attention(tensor_in, attention_mask)) + position_info
         feedforward_in = self.layer_norm_1(attention_out + tensor_in)
         feedforward_out = self.dropout(self.feed_forward(feedforward_in))
         return self.layer_norm_2(feedforward_out + feedforward_in)
